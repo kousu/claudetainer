@@ -1,0 +1,126 @@
+#!/bin/sh
+
+set -eu
+
+build_claudetainer() {
+
+ # build claude-code container
+ docker build --secret id=claude.json,src=$HOME/.claude.json -t claude - <<CONTAINERFILE
+FROM docker.io/archlinux:latest as base
+
+RUN pacman-key --init
+RUN pacman -Syu --noconfirm \
+  curl \
+  git \
+  sudo \
+  base-devel
+
+# makepkg and pikaur refuse to run as root, but they also can't install dependencies
+# automatically without sudo
+RUN useradd -m --system -b /var/lib automatic-updates
+RUN echo 'automatic-updates ALL=(ALL) NOPASSWD: /usr/bin/pikaur, /usr/bin/pacman' > /etc/sudoers.d/automatic-updates
+
+# install claude-code
+USER automatic-updates
+WORKDIR /var/lib/automatic-updates
+RUN curl -JLO https://aur.archlinux.org/cgit/aur.git/snapshot/pikaur.tar.gz \
+  && tar -xvf pikaur.tar.gz \
+  && cd pikaur \
+  && makepkg -si --noconfirm
+RUN rm -rv pikaur*
+RUN pikaur -Syu --noconfirm claude-code
+
+# set up user account
+USER root
+RUN useradd -m -s /bin/bash claude
+
+# tools claude likes
+RUN pacman -S --noconfirm \
+  jq \
+  tree \
+  less \
+  ripgrep \
+  fd \
+  bat \
+  git-delta
+
+# languages
+RUN pacman -S --noconfirm \
+  python-uv \
+  go \
+  rust \
+  typescript \
+  pnpm
+
+# clean up build/install caches to debloat the container
+RUN pikaur -Scc --noconfirm
+
+RUN echo 'claude-code' > /etc/hostname
+COPY <<'MOTD' /etc/motd
+
+>>>>> claude-code container <<<<
+
+$ claude   # get into claude in your project directory
+
+You, and therefore claude, doesn't have sudo in the container.
+If you need to edit shit in the container, run
+
+$ docker ps # -> find and note the CONTAINER_ID
+$ docker exec -it --user root \$CONTAINER_ID bash
+
+If you need to install things with pacman you can do it that way.
+If you need to install things from the AUR, instead do
+
+$ docker exec -it --user automatic-upgrades \$CONTAINER_ID bash
+$ pikaur -S ...
+
+MOTD
+
+RUN echo 'cat /etc/motd' >> /etc/bash.bashrc
+
+USER claude
+WORKDIR /home/claude/project
+
+# TODO: do this or not do this?
+ENTRYPOINT ["claude"]
+CONTAINERFILE
+}
+
+docker image exists claude || build_claudetainer
+
+
+# pull in creds
+if [ ! -s ~/.config/claudetainer/claude.json ]; then
+  mkdir -p ~/.config/claudetainer
+  echo '{"theme": "dark"}' > ~/.config/claudetainer/claude.json
+  if [ -s ~/.claude.json ]; then \
+    jq '{userID, oauthAccount, claudeCodeFirstTokenDate, hasCompletedOnboarding }' \
+        ~/.claude.json > ~/.config/claudetainer/claude.json; \
+  fi
+fi
+# TODO: to --rm or not to --rm ?
+# by doing run -d + exec, quitting with ctrl-d doesn't erase the container
+# but by doing --rm, `docker stop $CONTAINER_ID` will erase it.
+
+# TODO: support mounting in multiple folders
+PROJECT="$(pwd)"
+name=$(basename "$PROJECT")-$(openssl rand -hex 2)
+
+CONTAINER=$(docker run \
+ -dt \
+ --rm \
+ --hostname claudetainer \
+ --name "$name" \
+ --label claude \
+ --uidmap 0:1:$UID \
+ --uidmap $UID:0:1 \
+ --uidmap $(($UID + 1)):1001:64535  \
+ --gidmap 0:1:$UID \
+ --gidmap $UID:0:1 \
+ --gidmap $(($UID + 1)):1001:64535  \
+ -v ~/.config/claudetainer/claude.json:/home/claude/.claude.json \
+ -v "$PROJECT":/home/claude/project/ \
+ "$@" \
+ claude:latest
+ )
+docker exec -it "$CONTAINER" claude
