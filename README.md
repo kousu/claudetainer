@@ -1,4 +1,4 @@
-# claudetainer
+# claudtainer
 
 Run claude-code in a rootless container, so it can't accidentally rm your system.
 
