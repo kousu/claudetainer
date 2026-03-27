@@ -53,7 +53,9 @@ RUN pacman -S --noconfirm \
   pnpm
 
 # clean up build/install caches to debloat the container
+USER automatic-updates
 RUN pikaur -Scc --noconfirm
+USER root
 
 RUN echo 'claude-code' > /etc/hostname
 COPY <<'MOTD' /etc/motd
